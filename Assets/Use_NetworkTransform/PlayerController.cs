@@ -10,10 +10,13 @@ public class PlayerController : NetworkBehaviour
     public float gravityMultiplier = 2f; // 중력 배율
     private bool isGrounded = true;
     private bool isStabbing = false;
+    [SerializeField] private float preAttackDelay = 0.3f; // 애니메이션 시작 후 활성화까지 시간
+    [SerializeField] private float activeDuration = 0.1f; // 공격 범위 활성화 시간
+    [SerializeField] private float postAttackDelay = 0.3f; // 비활성화 후 대기 시간
 
-    [SerializeField]    
+    [SerializeField]
     private bool isDied = false;
-    [SerializeField]    
+    [SerializeField]
     private NetworkVariable<bool> isDiedNetVar = new NetworkVariable<bool>(false);
 
 
@@ -38,13 +41,14 @@ public class PlayerController : NetworkBehaviour
 
         // 콜라이더 비활성화
         stabCollider.enabled = false;
+        //isDiedNetVar.OnValueChanged += OnDiedStatusChanged;
     }
 
     private void Update()
     {
         if (!IsOwner) return;
 
-        if(!isDiedNetVar.Value)
+        if (!isDiedNetVar.Value)
         {
 
             if (!isStabbing)
@@ -64,7 +68,11 @@ public class PlayerController : NetworkBehaviour
         }
         else
         {
-
+            if (!isDied)
+            {
+                Debug.Log("UpdateDieTest");
+                isDied = true;
+            }
         }
 
     }
@@ -85,11 +93,11 @@ public class PlayerController : NetworkBehaviour
                 transform.rotation = Quaternion.Euler(0f, 90f, 0f);
             }
 
-            animator.SetBool("isWalking", true); // 걷기 애니메이션 시작
+            MoveAnimToServerRpc(true); // 걷기 애니메이션 시작
         }
         else
         {
-            animator.SetBool("isWalking", false); // 걷기 애니메이션 중지
+            MoveAnimToServerRpc(false); // 걷기 애니메이션 중지
         }
 
         // 이동
@@ -97,6 +105,11 @@ public class PlayerController : NetworkBehaviour
         m_NetworkTransform.transform.position += movement * speed * Time.deltaTime;
     }
 
+    [ServerRpc]
+    void MoveAnimToServerRpc(bool isTrue)
+    {
+        animator.SetBool("isWalking", isTrue);
+    }
     void Jump()
     {
         rb.AddForce(new Vector3(0f, jumpForce, 0f), ForceMode.Impulse);
@@ -105,31 +118,38 @@ public class PlayerController : NetworkBehaviour
 
     void Stab()
     {
-        animator.SetTrigger("Stab");
-        StartCoroutine(ActivateStabCollider()); // 공격 콜라이더 활성화 코루틴 시작
+        TriggerStabServerRpc();// 공격 콜라이더 활성화 코루틴 시작
     }
 
+    [ServerRpc]
+    void TriggerStabServerRpc()
+    {
+        animator.SetTrigger("Stab");
+        StartCoroutine(ActivateStabCollider());
+    }
     private IEnumerator ActivateStabCollider()
     {
         isStabbing = true;
 
-        // 찌르기 애니메이션의 절반 정도 지속 시간 동안 공격을 유지 (예시로 0.5초로 설정)
-        yield return new WaitForSeconds(0.3f);
+        // 애니메이션의 초기 지연 시간
+        yield return new WaitForSeconds(preAttackDelay);
 
-        // 애니메이션 시작 후 잠시 기다리고 콜라이더 활성화
+        // 공격 범위 활성화 및 시각적 효과
         stabCollider.enabled = true;
         cubeRenderer.material = materials[1];
-        yield return new WaitForSeconds(0.1f);
 
-        // 공격이 끝날 때 콜라이더 비활성화
+        // 활성화 유지 시간
+        yield return new WaitForSeconds(activeDuration);
 
-        cubeRenderer.material = materials[0];
+        // 공격 범위 비활성화 및 시각적 효과 복구
         stabCollider.enabled = false;
-        yield return new WaitForSeconds(0.3f);
+        cubeRenderer.material = materials[0];
+
+        // 후속 대기 시간
+        yield return new WaitForSeconds(postAttackDelay);
 
         isStabbing = false;
     }
-
 
     private void FixedUpdate()
     {
@@ -152,56 +172,45 @@ public class PlayerController : NetworkBehaviour
     {
         if (other.CompareTag("Attack"))
         {
-            Debug.Log("공격에 닿음");
-
-            if (IsOwner) // 공격받은 플레이어가 로컬 플레이어인 경우
+            //if(IsOwner)
+            //{
+            //    Debug.Log($"{gameObject.name}가 공격에 닿음");
+            //    DieServerRpc();
+            //}
+            //else
+            if (IsServer)
             {
-                // 로컬 플레이어가 공격받으면 서버로 죽음 처리 요청
-                DieServerRpc();
-            }
-            else
-            {
-                // 다른 플레이어가 공격을 받으면 서버에서 처리하도록 함
-                DieOtherPlayerServerRpc();
+                isDiedNetVar.Value = true;
+                Debug.Log("서버에서 맞은거 처리");
+                UpdateDieStateClientRpc();
             }
         }
     }
-    void Die()
-    {
-        isDiedNetVar.Value = true;
-        animator.SetTrigger("Die");
-    }
-
-
-    // 로컬 플레이어가 죽을 때 서버에 요청하는 RPC
-    [ServerRpc(RequireOwnership = false)] // 다른 클라이언트도 호출할 수 있도록 설정
+    // 클라이언트에서 서버로 사망 처리 및 상태 전파
+    [ServerRpc]
     void DieServerRpc()
     {
         // 서버에서 사망 처리
-        isDiedNetVar.Value = true; // 네트워크 변수 값을 설정하여 모든 클라이언트에 반영
+        //Die();
+        isDiedNetVar.Value = true;
         animator.SetTrigger("Die");
 
         // 서버에서 모든 클라이언트에게 사망 상태 전파
         UpdateDieStateClientRpc();
     }
 
-    // 다른 플레이어가 죽을 때 서버에서 처리하는 RPC
-    [ServerRpc(RequireOwnership = false)]
-    void DieOtherPlayerServerRpc()
-    {
-        // 서버에서 죽음 처리
-        Die();
-
-        // 서버에서 모든 클라이언트에게 사망 상태 전파
-        UpdateDieStateClientRpc();
-    }
-
-    // 클라이언트에서 사망 상태를 업데이트하는 RPC
+    // 클라이언트에게 사망 상태 업데이트
     [ClientRpc]
     void UpdateDieStateClientRpc()
     {
         // 서버에서 모든 클라이언트에 사망 상태 업데이트
-        Die();
-    }
+        // 다른 클라이언트에서 isDiedNetVar.Value가 true로 갱신됨
 
+        if (isDiedNetVar.Value)
+        {
+            // 다른 클라이언트가 죽었을 때 처리할 로직
+            animator.SetTrigger("Die");
+        }
+        // Destroy(gameObject, 1.5f);
+    }
 }
